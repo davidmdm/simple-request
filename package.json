@@ -2,8 +2,7 @@
   "name": "beggar",
   "version": "0.13.1",
   "description": "",
-  "main": "index.js",
-  "typings": "index.d.ts",
+  "main": "dist/index.js",
   "dependencies": {
     "form-data": "^4.0.0",
     "qs": "^6.10.1"
@@ -12,14 +11,14 @@
     "@types/body-parser": "^1.19.0",
     "@types/mocha": "^8.2.2",
     "@types/multer": "^1.4.5",
-    "@types/node": "^15.12.2",
+    "@types/node": "^15.14.9",
     "@types/qs": "^6.9.6",
     "body-parser": "^1.19.0",
     "mocha": "^9.0.0",
     "multer": "^1.4.2",
     "nyc": "^15.1.0",
     "prettier": "^2.3.1",
-    "typescript": "^4.3.3"
+    "typescript": "^4.9.5"
   },
   "scripts": {
     "pub": "npm i && npm t && npm publish",

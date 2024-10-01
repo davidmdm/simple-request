@@ -1,23 +1,19 @@
-//@ts-nocheck
-'use strict';
+import http = require('http');
+import https = require('https');
+import tls = require('tls');
 
-const http = require('http');
-const https = require('https');
-const tls = require('tls');
+import util = require('util');
+import { URL } from 'url';
+import { Readable, PassThrough } from 'stream';
 
-const util = require('util');
-const { URL } = require('url');
-const { Readable, PassThrough } = require('stream');
+import qs = require('qs');
+import querystring = require('querystring');
+import FormData = require('form-data');
 
-const qs = require('qs');
-const querystring = require('querystring');
-const FormData = require('form-data');
-
-const { Connection } = require('./connection');
-const { sanitizeOpts } = require('./options');
+import { Connection } from './connection';
+import { Options, RequestOptions, sanitizeOpts } from './options';
 
 const version = require('../package.json').version;
-const methods = http.METHODS.map(method => method.toLowerCase());
 
 const defaultUserAgent = util.format(
   'Beggar/%s (Node.js %s; %s %s)',
@@ -27,7 +23,7 @@ const defaultUserAgent = util.format(
   process.arch
 );
 
-const httpLib = protocol => {
+const httpLib = (protocol: string) => {
   switch (protocol) {
     case 'http:':
       return http;
@@ -38,28 +34,32 @@ const httpLib = protocol => {
   }
 };
 
-const createProxiedConnection = options => {
+const createProxiedConnection = (options: RequestOptions) => {
+  if (!options.proxy) {
+    throw new Error('unreachable');
+  }
+
   const passthrough = new PassThrough();
   const conn = new Connection(passthrough, options);
 
   const proxyAuth =
-    options.proxy.username &&
-    options.proxy.password &&
+    options.proxy?.username &&
+    options.proxy?.password &&
     'Basic ' + Buffer.from(`${options.proxy.username}:${options.proxy.password}`).toString('base64');
 
-  const proxyHttpLib = httpLib(options.proxy.protocol);
+  const proxyHttpLib = httpLib(options.proxy.uri.protocol);
   const targetHttpLib = httpLib(options.uri.protocol);
 
   const proxyPath = util.format(
     '%s:%s',
     options.uri.hostname,
-    options.uri.port || targetHttpLib.globalAgent.defaultPort
+    options.uri.port || (targetHttpLib === http ? '80' : '443')
   );
 
   proxyHttpLib
     .request({
-      host: options.proxy.hostname,
-      port: options.proxy.port,
+      host: options.proxy.uri.hostname,
+      port: options.proxy.uri.port,
       headers: {
         host: options.uri.host,
         'User-Agent': (options.headers && options.headers['user-agent']) || defaultUserAgent,
@@ -68,14 +68,14 @@ const createProxiedConnection = options => {
       method: 'CONNECT',
       path: proxyPath,
       agent: false,
-      ...options.proxyTls,
+      ...options.proxy.tls,
     })
     .on('connect', function (_, socket) {
       const req = targetHttpLib
         .request(options.uri, {
           method: options.method && options.method.toUpperCase(),
           headers: { 'User-Agent': defaultUserAgent, ...options.headers },
-          auth: options.auth && options.auth.user + ':' + options.auth.pass,
+          auth: options.auth && options.auth.username + ':' + options.auth.password,
           createConnection: () => {
             if (options.uri.protocol === 'http:') {
               return socket;
@@ -94,20 +94,21 @@ const createProxiedConnection = options => {
   return conn;
 };
 
-const createConnection = options => {
+const createConnection = (options: RequestOptions) => {
   const req = httpLib(options.uri.protocol).request(options.uri, {
     method: options.method && options.method.toUpperCase(),
     headers: { 'User-Agent': defaultUserAgent, ...options.headers },
-    auth: options.auth && options.auth.user + ':' + options.auth.pass,
+    auth: options.auth && options.auth.username + ':' + options.auth.password,
     agent: options.agent,
     ...options.tls,
   });
 
   const responsePromise = new Promise((resolve, reject) =>
     req.on('response', resp => {
-      if (options.maxRedirects > 0 && resp.statusCode >= 301 && resp.statusCode <= 303) {
+      if (options.maxRedirects > 0 && resp.statusCode && resp.statusCode >= 301 && resp.statusCode <= 303) {
         const location = resp.headers.location;
-        const qualifiedRedirection = location.startsWith('/') ? options.uri.origin + location : location;
+        const qualifiedRedirection =
+          location && location.startsWith('/') ? options.uri.origin + location : location || '/';
 
         // we do no want to leak memory so we must consume response stream,
         // but we do not want to destroy the response as that would destroy the underlying
@@ -137,12 +138,12 @@ const createConnection = options => {
   return conn;
 };
 
-function isUri(value) {
+function isUri(value: any) {
   return typeof value === 'string' || value instanceof URL;
 }
 
-function request(uri, opts = {}) {
-  const options = sanitizeOpts(isUri(uri) ? { ...opts, uri } : uri);
+export function _request(uri: string | Options, opts?: Options) {
+  const options = sanitizeOpts(isUri(uri) ? { ...opts, uri } : { ...opts, ...uri });
 
   if (options.path) {
     options.uri.pathname = options.path;
@@ -167,7 +168,7 @@ function request(uri, opts = {}) {
   } else if (typeof options.body === 'string' || options.body instanceof Buffer) {
     conn.setHeader('Content-Length', options.body.length);
     conn.end(options.body);
-  } else if (options.body instanceof Readable && options.body._readableState.objectMode === false) {
+  } else if (options.body instanceof Readable && (options.body as any)._readableState.objectMode === false) {
     options.body.pipe(conn);
   } else if (options.body !== undefined) {
     const payload = JSON.stringify(options.body);
@@ -191,16 +192,9 @@ function request(uri, opts = {}) {
   return conn;
 }
 
-for (const method of methods) {
-  request[method] = (uri, options = {}) => {
-    if (isUri(uri)) {
-      return request(uri, { ...options, method });
-    }
-    return request({ ...uri, method });
-  };
-}
+type BaseRequestFunc = typeof _request;
 
-const wrapWithDefaults = (fn, defaults) => {
+const wrapWithDefaults = (fn: BaseRequestFunc, defaults: Options): BaseRequestFunc => {
   return (uri, opts = {}) => {
     if (isUri(uri)) {
       return fn(uri, { ...defaults, ...opts });
@@ -209,12 +203,15 @@ const wrapWithDefaults = (fn, defaults) => {
   };
 };
 
-request.defaults = defaults => {
-  const wrapper = wrapWithDefaults(request, defaults);
-  for (const method of methods) {
-    wrapper[method] = wrapWithDefaults(request[method], defaults);
-  }
-  return wrapper;
-};
+const methods = ['get', 'post', 'put', 'delete', 'head', 'options'] as const;
 
-module.exports = { request };
+const methodRequests = methods.reduce((acc, verb) => {
+  acc[verb] = wrapWithDefaults(_request, { method: verb });
+  return acc;
+}, {} as Record<typeof methods[number], BaseRequestFunc>);
+
+export const request = Object.assign(_request, methodRequests, {
+  defaults: (opts: Options): BaseRequestFunc => wrapWithDefaults(_request, opts),
+});
+
+export type Request = typeof request;
